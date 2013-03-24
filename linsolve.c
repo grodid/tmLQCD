@@ -40,6 +40,7 @@
 #include "linalg/assign_add_mul_r_add_mul.h"
 #include "linsolve.h"
 #include "gettime.h"
+#include "solver/solver.h"
 
 /* k output , l input */
 int solve_cg(spinor * const k, spinor * const l, double eps_sq, const int rel_prec)
@@ -159,7 +160,81 @@ int solve_cg(spinor * const k, spinor * const l, double eps_sq, const int rel_pr
 
 
 /* k output , l input */
-int bicg(spinor * const k, spinor * const l, double eps_sq, const int rel_prec) {
+int solve_mcr(spinor * const k, spinor * const l, double eps_sq, const int rel_prec)
+{
+	static double err, squarenorm;
+	int iteration = 0, i, j;
+	int save_sloppy = g_sloppy_precision;
+	double atime, etime, flops;
+	complex double alpha, beta;
+	static complex double one = 1.0;
+	double normsq;
+
+	/* initialize residue r and search vector p */
+	atime = gettime();
+	squarenorm = square_norm(l, VOLUME/2, 1);
+
+	Qtm_pm_psi(g_spinor_field[DUM_SOLVER], k); 
+
+	diff(g_spinor_field[DUM_SOLVER+1], l, g_spinor_field[DUM_SOLVER], VOLUME/2);
+	assign(g_spinor_field[DUM_SOLVER+2], g_spinor_field[DUM_SOLVER+1], VOLUME/2);
+	Qtm_pm_psi(g_spinor_field[DUM_SOLVER+4], g_spinor_field[DUM_SOLVER]);
+	normsq=square_norm(g_spinor_field[DUM_SOLVER+1], VOLUME/2, 1);
+	/*	DUM_SOLVER+1: chi
+		DUM_SOLVER+2: xi
+		DUM_SOLVER+3: Achi
+		DUM_SOLVER+4: Axi
+		DUM_SOLVER: temp
+	*/
+
+	/* main loop */
+	for(iteration = 1; iteration <= ITER_MAX_CG; iteration++) {
+		//Qtm_pm_psi(g_spinor_field[DUM_SOLVER], g_spinor_field[DUM_SOLVER+2]);
+		alpha=scalar_prod(g_spinor_field[DUM_SOLVER+4], g_spinor_field[DUM_SOLVER+1], VOLUME/2, 1);
+		normsq = square_norm(g_spinor_field[DUM_SOLVER+4], VOLUME/2, 1);
+		alpha /= normsq;
+
+		assign_add_mul(k, g_spinor_field[DUM_SOLVER+2], alpha, VOLUME/2);
+		assign_diff_mul(g_spinor_field[DUM_SOLVER+1], g_spinor_field[DUM_SOLVER+4], alpha, VOLUME/2);
+
+		err=square_norm(g_spinor_field[DUM_SOLVER+1], VOLUME/2, 1);
+
+		if(g_proc_id == g_stdio_proc && g_debug_level > 1) {
+			printf("MCR (linsolve): iterations: %d res^2 %e\n", iteration, err);
+			fflush(stdout);
+		}
+
+		if (((err <= eps_sq) && (rel_prec == 0)) || ((err <= eps_sq*squarenorm) && (rel_prec == 1))){
+			break;
+		}
+		Qtm_pm_psi(g_spinor_field[DUM_SOLVER+3], g_spinor_field[DUM_SOLVER+1]);
+		beta = scalar_prod(g_spinor_field[DUM_SOLVER+4], g_spinor_field[DUM_SOLVER+3], VOLUME/2, 1);
+		beta /= -normsq;
+	
+		assign_mul_add_mul(g_spinor_field[DUM_SOLVER+2], beta, g_spinor_field[DUM_SOLVER+1], one, VOLUME/2);
+		assign_mul_add_mul(g_spinor_field[DUM_SOLVER+4], beta, g_spinor_field[DUM_SOLVER+3], one, VOLUME/2);
+		//assign_mul_add(g_spinor_field[DUM_SOLVER+2], beta_cg, g_spinor_field[DUM_SOLVER], VOLUME/2);
+		//assign(g_spinor_field[DUM_SOLVER+1], g_spinor_field[DUM_SOLVER], VOLUME/2);
+		//normsq=err;
+	}
+	etime = gettime();
+	/* 2 A + 2 Nc Ns + N_Count ( 2 A + 10 Nc Ns ) */
+	/* 2*1320.0 because the linalg is over VOLUME/2 */
+	//flops = (2*(2*1320.0+2*3*4) + 2*3*4 + iteration*(2.*(2*1320.0+2*3*4) + 10*3*4))*VOLUME/2/1.0e6f;
+	if(g_proc_id==0 && g_debug_level > 0) {
+		printf("MCR: iter: %d eps_sq: %1.4e t/s: %1.4e\n", iteration, eps_sq, etime-atime); 
+		//printf("CG: flopcount: t/s: %1.4e mflops_local: %.1f mflops: %.1f\n", 
+		//		etime-atime, flops/(etime-atime), g_nproc*flops/(etime-atime));
+	}
+	g_sloppy_precision = save_sloppy;
+	return(iteration);
+}
+
+
+
+
+/* k output , l input */
+int bicg(spinor * const k, spinor * const l, double eps_sq, const int rel_prec, const int alt_solver) {
 
   double err, d1, squarenorm=0.;
   _Complex double rho0, rho1, omega, alpha, beta;
@@ -227,6 +302,9 @@ int bicg(spinor * const k, spinor * const l, double eps_sq, const int rel_prec) 
 
   /* if bicg fails, redo with conjugate gradient */
   if(iteration>=ITER_MAX_BCG){
+		if (alt_solver == MCR)
+			iteration = solve_mcr(k, l, eps_sq, rel_prec);
+		else
     iteration = solve_cg(k,l,eps_sq, rel_prec);
     /* Save the solution for reuse! not needed since Chronological inverter is there */
     /*     assign(g_spinor_field[DUM_DERI+6], k, VOLUME/2); */
@@ -443,7 +521,7 @@ int evamax0(double *rz, int k, double q_off, double eps_sq) {
   return j;
 }
 
-/* this is actually the not the bicg but the geometric series 
+/* this is actually not the bicg but the geometric series 
    The use of the geometric series avoids  in contrast to the bicg
    reversibility problems when a reduced accuracy of the solver employed
 
