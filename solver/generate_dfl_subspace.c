@@ -77,7 +77,6 @@ static void random_fields(const int Ns) {
       ranlxs(s,24);
       for (j = 0; j < 24; j++) {
  	(*t) = (double)(r*(s[j]-0.5f)); 
-	(*t) = 1.; 
  	t += 1; 
       }
     }
